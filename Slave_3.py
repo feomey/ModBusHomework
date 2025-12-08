@@ -1,15 +1,3 @@
-"""从站（带 GUI）
-
-说明：
-- 使用 `pymodbus` 提供 Modbus TCP 服务（监听本机 5020 端口）
-- 提供一个简单 Tkinter GUI，显示指示灯和计数
-- 当 coil[0] 为 1 时，从站每秒将保持寄存器 hr[0] 加 1
-
-运行：
- 1. 安装依赖：`pip install pymodbus`
- 2. 运行本文件：`python Slave_3.py`
-"""
-
 from pymodbus.server.sync import StartTcpServer
 from pymodbus.datastore import ModbusSequentialDataBlock, ModbusSlaveContext, ModbusServerContext
 from pymodbus.device import ModbusDeviceIdentification
@@ -27,8 +15,8 @@ UNIT_ID = 1
 
 # 全局共享上下文，GUI 与服务器线程共享
 _slave_storage = ModbusSlaveContext(
-    co=ModbusSequentialDataBlock(0, [0] * 1),  # 仅需要 1 个线圈
-    hr=ModbusSequentialDataBlock(0, [0] * 1),  # 仅需要 1 个保持寄存器
+    co=ModbusSequentialDataBlock(0, [0] * 1),  
+    hr=ModbusSequentialDataBlock(0, [0] * 1),  #
     zero_mode=True,
 )
 _server_context = ModbusServerContext(slaves=_slave_storage, single=True)
@@ -48,10 +36,7 @@ def run_server(host='0.0.0.0', port=5020):
 
 
 class DeviceSimulator:
-    """带 GUI 的设备模拟器：
-    - 根据 `coil[0]` 控制运行/停止指示
-    - 在运行时每秒将计数写入保持寄存器 0
-    """
+
 
     def __init__(self, master):
         self.master = master

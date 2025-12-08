@@ -1,13 +1,3 @@
-"""主站（带 GUI）
-
-提供三个按钮：
-- 写单个线圈 (FC05) — 将 slave 的 coil[0] 置为 1
-- 读线圈 (FC01) — 读取 coil[0] 并在界面显示 1/0
-- 读保持寄存器 (FC03) — 读取 hr[0] 并在界面显示数值
-
-运行前请确保 `Slave_3.py` 在本机运行并监听 `127.0.0.1:5020`。
-"""
-
 import tkinter as tk
 from tkinter import ttk
 from pymodbus.client.sync import ModbusTcpClient
