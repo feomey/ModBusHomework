@@ -1,98 +1,124 @@
+"""从站（带 GUI）
+
+说明：
+- 使用 `pymodbus` 提供 Modbus TCP 服务（监听本机 5020 端口）
+- 提供一个简单 Tkinter GUI，显示指示灯和计数
+- 当 coil[0] 为 1 时，从站每秒将保持寄存器 hr[0] 加 1
+
+运行：
+ 1. 安装依赖：`pip install pymodbus`
+ 2. 运行本文件：`python Slave_3.py`
+"""
+
+from pymodbus.server.sync import StartTcpServer
+from pymodbus.datastore import ModbusSequentialDataBlock, ModbusSlaveContext, ModbusServerContext
+from pymodbus.device import ModbusDeviceIdentification
+import logging
 import threading
-import time
 import tkinter as tk
-from pymodbus.server import StartSerialServer
-from pymodbus.datastore import ModbusSequentialDataBlock
-from pymodbus.datastore import ModbusSlaveContext, ModbusServerContext
-PORT = 'COM2'
-SLAVE_ID = 1
+from tkinter import ttk
+import time
 
-# 定义全局的数据存储区，方便 GUI 和 Modbus 线程共享
-# Coils: 0=灯的状态, Registers: 0=运行次数
-store = ModbusSlaveContext(
-    co=ModbusSequentialDataBlock(0, [0] * 10),
-    hr=ModbusSequentialDataBlock(0, [0] * 10),
-    zero_mode=True
+logging.basicConfig()
+log = logging.getLogger()
+log.setLevel(logging.INFO)
+
+UNIT_ID = 1
+
+# 全局共享上下文，GUI 与服务器线程共享
+_slave_storage = ModbusSlaveContext(
+    co=ModbusSequentialDataBlock(0, [0] * 1),  # 仅需要 1 个线圈
+    hr=ModbusSequentialDataBlock(0, [0] * 1),  # 仅需要 1 个保持寄存器
+    zero_mode=True,
 )
-context = ModbusServerContext(slaves=store, single=True)
+_server_context = ModbusServerContext(slaves=_slave_storage, single=True)
 
 
-class SlaveApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title(f"从站设备 (ID: {SLAVE_ID})")
-        self.root.geometry("300x250")
+def run_server(host='0.0.0.0', port=5020):
+    identity = ModbusDeviceIdentification()
+    identity.VendorName = 'Example'
+    identity.ProductCode = 'MB'
+    identity.VendorUrl = 'http://example.local'
+    identity.ProductName = 'Modbus Slave 3'
+    identity.ModelName = 'ModbusSlave3'
+    identity.MajorMinorRevision = '1.0'
 
-        # 1. 界面元素
-        tk.Label(root, text="--- 现场设备模拟器 ---", font=("微软雅黑", 12, "bold")).pack(pady=10)
+    log.info(f"Starting Modbus TCP server on {host}:{port} (unit {UNIT_ID})")
+    StartTcpServer(context=_server_context, identity=identity, address=(host, port))
 
-        # 指示灯 (Canvas)
-        self.canvas = tk.Canvas(root, width=80, height=80)
-        self.canvas.pack()
-        # 画圆：初始灰色
-        self.light = self.canvas.create_oval(10, 10, 70, 70, fill="gray", outline="black", width=2)
 
-        self.lbl_status = tk.Label(root, text="设备状态: 停止", font=("Arial", 10), fg="gray")
-        self.lbl_status.pack(pady=5)
+class DeviceSimulator:
+    """带 GUI 的设备模拟器：
+    - 根据 `coil[0]` 控制运行/停止指示
+    - 在运行时每秒将计数写入保持寄存器 0
+    """
 
-        self.lbl_count = tk.Label(root, text="当前运行次数: 0", font=("Arial", 14))
-        self.lbl_count.pack(pady=10)
+    def __init__(self, master):
+        self.master = master
+        self.master.title(f"模拟从站 (Unit {UNIT_ID})")
+        self.master.geometry('320x240')
+        self.master.resizable(False, False)
 
-        # 内部变量用于计数
-        self.run_count = 0
-        self.last_time = time.time()
+        header = ttk.Label(self.master, text='设备模拟器', font=(None, 14, 'bold'))
+        header.pack(pady=8)
 
-        # 2. 启动 GUI 刷新循环
-        self.update_loop()
+        self.indicator = tk.Label(self.master, text=' ', width=8, height=4, bg='lightgray', relief=tk.RIDGE)
+        self.indicator.pack(pady=6)
 
-    def update_loop(self):
-        """主线程定时任务：检查 Modbus 数据并更新界面"""
+        self.state_label = ttk.Label(self.master, text='状态: 停止')
+        self.state_label.pack(pady=4)
 
-        # 获取当前的线圈状态 (Coil 0)
-        slave_store = context[SLAVE_ID]
-        is_running = slave_store.getValues(1, 0, count=1)[0]  # 1=Coils, 0=Address
+        self.counter_label = ttk.Label(self.master, text='计数: 0', font=(None, 14))
+        self.counter_label.pack(pady=8)
 
-        # --- 更新界面显示 ---
-        if is_running:
-            self.canvas.itemconfig(self.light, fill="#00FF00")  # 绿灯
-            self.lbl_status.config(text="设备状态: 运行中", fg="green")
+        btns = ttk.Frame(self.master)
+        btns.pack(pady=6)
+        ttk.Button(btns, text='启动(本地)', command=lambda: self._set_coil_local(1)).grid(row=0, column=0, padx=6)
+        ttk.Button(btns, text='停止(本地)', command=lambda: self._set_coil_local(0)).grid(row=0, column=1, padx=6)
 
-            # --- 模拟业务逻辑：如果运行中，每秒计数+1 ---
-            if time.time() - self.last_time >= 1.0:
-                self.run_count += 1
-                self.last_time = time.time()
-                # 将新计数写入保持寄存器 (Holding Register 0)
-                slave_store.setValues(3, 0, [self.run_count])  # 3=Holding Reg
+        self._count = 0
+        self._last_tick = time.time()
 
+        self._ui_loop()
+
+    def _set_coil_local(self, val: int):
+        ds = _server_context[UNIT_ID]
+        ds.setValues(1, 0, [val])
+
+    def _ui_loop(self):
+        ds = _server_context[UNIT_ID]
+        try:
+            coil_val = ds.getValues(1, 0, count=1)[0]
+        except Exception:
+            coil_val = 0
+
+        if coil_val:
+            self.indicator.config(bg='#07c160')
+            self.state_label.config(text='状态: 运行中')
+            if time.time() - self._last_tick >= 1.0:
+                self._count += 1
+                self._last_tick = time.time()
+                try:
+                    ds.setValues(3, 0, [self._count])
+                except Exception:
+                    pass
         else:
-            self.canvas.itemconfig(self.light, fill="gray")  # 灭灯
-            self.lbl_status.config(text="设备状态: 已停止", fg="gray")
+            self.indicator.config(bg='lightgray')
+            self.state_label.config(text='状态: 已停止')
 
-        # 更新计数显示
-        self.lbl_count.config(text=f"当前运行次数: {self.run_count}")
-
-        # 100ms 后再次刷新
-        self.root.after(100, self.update_loop)
+        self.counter_label.config(text=f'计数: {self._count}')
+        self.master.after(200, self._ui_loop)
 
 
-def start_modbus_server():
-    """在后台线程启动 Modbus 服务器"""
-    StartSerialServer(
-        context=context,
-        port=PORT,
-        baudrate=9600,
-        bytesize=8,
-        parity='N',
-        stopbits=1
-    )
+def main():
+    # 启动后台 Modbus 服务
+    th = threading.Thread(target=run_server, daemon=True)
+    th.start()
 
-
-if __name__ == "__main__":
-    # 1. 启动 Modbus 线程
-    t = threading.Thread(target=start_modbus_server, daemon=True)
-    t.start()
-
-    # 2. 启动 GUI 主程序
     root = tk.Tk()
-    app = SlaveApp(root)
+    sim = DeviceSimulator(root)
     root.mainloop()
+
+
+if __name__ == '__main__':
+    main()
