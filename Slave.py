@@ -3,129 +3,111 @@ import time
 import tkinter as tk
 from tkinter import ttk
 from pymodbus.server.sync import StartSerialServer
-from pymodbus.datastore import ModbusSequentialDataBlock
-from pymodbus.datastore import ModbusSlaveContext, ModbusServerContext
+from pymodbus.datastore import ModbusSequentialDataBlock, ModbusSlaveContext, ModbusServerContext
 
-# 从站 (Slave) 模块说明
-"""
-Slave.py
 
-这个模块提供一个简单的模拟从站：
-- 在后台启动一个 `pymodbus` 的串口服务器 `StartSerialServer`，将 Modbus 存储区暴露到串口上。
-- 通过 `DeviceSimulator` 提供一个本地 GUI：显示运行/停止状态、运行计数，并在 Coil 0 为 True 时每秒增加计数并写入保持寄存器 0。
+# 保持端口和从站 ID 不变以兼容现有 Master
+SERIAL_PORT = 'COM2'
+UNIT_ID = 1
 
-设计要点：
-- `context`：ModbusServerContext，包含 `ModbusSlaveContext`（coils 和 holding registers）。
-- `_start_server()`：在独立线程中调用 `StartSerialServer(...)`，避免阻塞主 GUI 线程。
-- `DeviceSimulator._tick()`：在主线程以 ~120ms 间隔读取 datastore 的 Coil 值并更新 UI，保证 GUI 与 Modbus 存储区同步。
-"""
 
-PORT = 'COM2'
-SLAVE_ID = 1
-
-# 新的存储区定义，功能等同于原来
-store = ModbusSlaveContext(
+# 共享的数据区：Coils 用于开关，Holding Registers 用于数值计数
+_slave_storage = ModbusSlaveContext(
     co=ModbusSequentialDataBlock(0, [0] * 10),
     hr=ModbusSequentialDataBlock(0, [0] * 10),
     zero_mode=True,
 )
-context = ModbusServerContext(slaves=store, single=True)
+_server_context = ModbusServerContext(slaves=_slave_storage, single=True)
 
 
 class DeviceSimulator:
-    """
-    简单的从站设备模拟器（GUI）：
+    """设备模拟器窗口，展示指示灯并驱动本地计数写回到保持寄存器。
 
-    - 读取 context 中的 Coil(1) 地址 0 作为“运行/停止”标志。
-    - 如果运行标志为 True，每秒将内部计数加1并写回保持寄存器 0（供 Master 读取）。
-    - UI 使用 Canvas 作为指示器、一个大号计数显示和一个重置按钮。
+    实现等价于原本的 SlaveApp，但使用不同命名与布局。
     """
 
-    def __init__(self, root):
-        self.root = root
-        self.root.title(f"模拟从站 — ID {SLAVE_ID}")
-        self.root.geometry("380x260")
-        self.root.resizable(False, False)
+    def __init__(self, master):
+        self.master = master
+        self.master.title(f"模拟从站 (Unit {UNIT_ID})")
+        self.master.geometry('360x260')
+        self.master.resizable(False, False)
 
-        container = ttk.Frame(root, padding=12)
-        container.pack(fill=tk.BOTH, expand=True)
+        header = ttk.Label(self.master, text='设备模拟器', font=(None, 14, 'bold'))
+        header.pack(pady=8)
 
-        header = ttk.Label(container, text="现场设备模拟器", font=("Segoe UI", 13, "bold"))
-        header.pack(pady=(0, 8))
+        # 使用 Label 做彩色指示（背景色变化）
+        self.indicator = tk.Label(self.master, text=' ', width=8, height=4, bg='lightgray', relief=tk.RIDGE)
+        self.indicator.pack(pady=6)
 
-        body = ttk.Frame(container)
-        body.pack(fill=tk.X)
+        self.state_label = ttk.Label(self.master, text='状态: 停止')
+        self.state_label.pack(pady=4)
 
-        # 状态显示使用 Canvas
-        self.indicator = tk.Canvas(body, width=100, height=100, highlightthickness=0)
-        self.indicator.grid(row=0, column=0, rowspan=3, padx=(0, 12))
-        self._oval = self.indicator.create_oval(8, 8, 92, 92, fill="#666666", outline="#222222", width=3)
+        self.counter_label = ttk.Label(self.master, text='计数: 0', font=(None, 14))
+        self.counter_label.pack(pady=8)
 
-        self.status_label = ttk.Label(body, text="状态: 停止", font=("Arial", 11))
-        self.status_label.grid(row=0, column=1, sticky=tk.W)
+        # 调试按钮：在 GUI 中直接修改 datastore 的 Coil 值
+        btns = ttk.Frame(self.master)
+        btns.pack(pady=6)
+        ttk.Button(btns, text='启动(本地)', command=lambda: self._set_coil_local(1)).grid(row=0, column=0, padx=6)
+        ttk.Button(btns, text='停止(本地)', command=lambda: self._set_coil_local(0)).grid(row=0, column=1, padx=6)
 
-        self.count_var = tk.StringVar(value="运行次数：0")
-        self.count_label = ttk.Label(body, textvariable=self.count_var, font=("Courier New", 18), foreground="#004D40")
-        self.count_label.grid(row=1, column=1, sticky=tk.W, pady=(6, 0))
+        # 内部计数与时间追踪
+        self._count = 0
+        self._last_tick = time.time()
 
-        # 控制按钮
-        ctrl = ttk.Frame(container)
-        ctrl.pack(pady=(12, 0))
-        ttk.Button(ctrl, text="重置计数", command=self._reset_count).grid(row=0, column=0, padx=6)
+        # 启动 UI 更新循环
+        self._ui_loop()
 
-        # 内部计数与时间记录
-        self._run_count = 0
-        self._last = time.time()
+    def _set_coil_local(self, val: int):
+        """直接在本地 datastore 中设置 Coil（用于调试/模拟主站写入）。"""
+        ds = _server_context[UNIT_ID]
+        ds.setValues(1, 0, [val])
 
-        # 启动定时更新（主线程）
-        self._tick()
+    def _ui_loop(self):
+        """定期从共享上下文读取 Coil，更新指示和计数。"""
+        ds = _server_context[UNIT_ID]
+        try:
+            coil_val = ds.getValues(1, 0, count=1)[0]
+        except Exception:
+            coil_val = 0
 
-    def _reset_count(self):
-        """本地按钮：重置计数（不会改变 Coil）"""
-        self._run_count = 0
-
-    def _tick(self):
-        """周期性从 `context` 读取 Coil(1) 的地址 0 并更新 UI / 写回保持寄存器。
-
-        - 以 120ms 间隔轮询 datastore（足够响应 UI 控制），
-        - 若 Coil 为 True，则每满 1 秒增加一次运行计数并写入保持寄存器 0。
-        """
-        store_ref = context[SLAVE_ID]
-        # 读取 Coil 0
-        run_flag = store_ref.getValues(1, 0, count=1)[0]
-
-        if run_flag:
-            # 运行中样式
-            self.indicator.itemconfig(self._oval, fill="#00C853")
-            self.status_label.config(text="状态: 运行中", foreground="#00A152")
-            # 每秒计数
-            if time.time() - self._last >= 1.0:
-                self._run_count += 1
-                self._last = time.time()
-                # 写回保持寄存器 0
-                store_ref.setValues(3, 0, [self._run_count])
+        if coil_val:
+            # 设备运行中
+            self.indicator.config(bg='#07c160')
+            self.state_label.config(text='状态: 运行中')
+            # 每秒计数并写入 HR0
+            if time.time() - self._last_tick >= 1.0:
+                self._count += 1
+                self._last_tick = time.time()
+                try:
+                    ds.setValues(3, 0, [self._count])
+                except Exception:
+                    pass
         else:
-            self.indicator.itemconfig(self._oval, fill="#8E8E8E")
-            self.status_label.config(text="状态: 已停止", foreground="#666666")
+            # 停止
+            self.indicator.config(bg='lightgray')
+            self.state_label.config(text='状态: 已停止')
 
-        self.count_var.set(f"运行次数：{self._run_count}")
-        self.root.after(120, self._tick)
+        self.counter_label.config(text=f'计数: {self._count}')
+
+        # 继续循环（短周期保证界面流畅）
+        self.master.after(120, self._ui_loop)
 
 
 def _start_server():
-    """在后台线程中直接调用 `StartSerialServer` 启动 Modbus 串口服务器。
+    """在后台线程启动串口 Modbus 服务器（共享 _server_context）。"""
+    StartSerialServer(context=_server_context, port=SERIAL_PORT, baudrate=9600, bytesize=8, parity='N', stopbits=1)
 
-    该函数会阻塞调用线程（因此我们在守护线程里运行它），
-    使得主线程可以继续运行 tkinter GUI。
-    """
-    StartSerialServer(context=context, port=PORT, baudrate=9600, bytesize=8, parity='N', stopbits=1)
+
+def main():
+    # 启动后台 Modbus 服务
+    th = threading.Thread(target=_start_server, daemon=True)
+    th.start()
+
+    root = tk.Tk()
+    sim = DeviceSimulator(root)
+    root.mainloop()
 
 
 if __name__ == '__main__':
-    # 启动 Modbus 服务在背景线程
-    t = threading.Thread(target=_start_server, daemon=True)
-    t.start()
-
-    root = tk.Tk()
-    app = DeviceSimulator(root)
-    root.mainloop()
+    main()
