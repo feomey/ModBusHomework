@@ -8,11 +8,6 @@ DEFAULT_SLAVE = 1
 
 
 class ControlPanel:
-    """重构后的主站界面类：功能等价于之前的 MasterApp
-
-    - 通过 ModbusSerialClient 与从站通信
-    - 写 Coil(0) 控制设备启停，读 Holding Register(0) 显示运行次数
-    """
 
     def __init__(self, master, port: str = DEFAULT_PORT, slave_id: int = DEFAULT_SLAVE):
         self.master = master
@@ -23,7 +18,7 @@ class ControlPanel:
         self.master.geometry("380x240")
         self.master.resizable(False, False)
 
-        # 建立 Modbus 客户端连接（保留旧行为：若连接失败，仍可运行界面）
+        # 建立 Modbus 客户端连接
         self.client_mod = ModbusSerialClient(port=self.port, baudrate=9600, bytesize=8, parity='N', stopbits=1, timeout=1)
         try:
             self.is_connected = self.client_mod.connect()
